@@ -5,9 +5,9 @@
 #include <Ticker.h>
 #include <ESPAsyncWebServer.h>
 #include <ESPDash.h>
-
-const char* ssid = "";
-const char* password = "";
+#include "AsyncJson.h"
+#include "ArduinoJson.h"
+#include "credentials.h"
 
 SoftwareSerial energyMeter(D7, D8, false);
 
@@ -17,6 +17,8 @@ ModbusMaster node;
 
 double voltage_usage = 0.0, current_usage = 0.0, active_power = 0.0, active_energy = 0.0, frequency = 0.0, power_factor = 0.0, over_power_alarm = 0.0; 
 bool modbus_status = false;
+
+StaticJsonDocument<1024> server_raw_values;
 
 uint8_t result;  uint16_t data[6];
 
@@ -33,12 +35,22 @@ void pzemdata(){
     if (result == node.ku8MBSuccess) {
       modbus_status = true;
       voltage_usage      = (node.getResponseBuffer(0x00) / 10.0f);
-      current_usage      = (node.getResponseBuffer(0x01) / 1000.000f);
-      active_power       = (node.getResponseBuffer(0x03) / 10.0f);
-      active_energy      = (node.getResponseBuffer(0x05) / 1.0f);
+      current_usage      = ((node.getResponseBuffer(0x02)<<16 | node.getResponseBuffer(0x01)) / 1000.000f);
+      active_power       = ((node.getResponseBuffer(0x04)<<16 | node.getResponseBuffer(0x03)) / 10.0f);
+      active_energy      = ((node.getResponseBuffer(0x06)<<16 | node.getResponseBuffer(0x05)) / 1.0f);
       frequency          = (node.getResponseBuffer(0x07) / 10.0f);
       power_factor       = (node.getResponseBuffer(0x08) / 100.0f);
       over_power_alarm   = (node.getResponseBuffer(0x09));
+
+      server_raw_values["modbus_status"] = modbus_status;
+      server_raw_values["voltage_usage"] = voltage_usage;
+      server_raw_values["current_usage"] = current_usage;
+      server_raw_values["active_power"] = active_power;
+      server_raw_values["active_energy"] = active_energy;
+      server_raw_values["frequency"] = frequency;
+      server_raw_values["power_factor"] = power_factor;
+      server_raw_values["over_power_alarm"] = over_power_alarm;
+
 
       Serial.print("VOLTAGE:           ");   Serial.println(voltage_usage);   // V
       Serial.print("CURRENT_USAGE:     ");   Serial.println(current_usage, 3);  //  A
@@ -142,6 +154,11 @@ void setup() {
   setupOTA();
   setupEnergyMeter();
   setupDashboard();
+  server.on("/raw", HTTP_GET, [](AsyncWebServerRequest *request){
+        String buffer;
+        serializeJsonPretty(server_raw_values, buffer);
+        request->send(200, "application/json", buffer);
+  });
   Serial.println("All done");
 }
 
