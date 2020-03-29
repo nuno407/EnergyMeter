@@ -1,13 +1,25 @@
+#define VOLTAGE "1"
+#define CURRENT "2"
+#define POWER "3"
+#define ENERGY "4"
+#define FREQUENCY "5"
+#define POWER_FACTOR "6"
+#define OVER_POWER_STATUS "7"
+
+#include <limits.h>
 #include <ESP8266WiFi.h>
+#include <ESPAsyncWebServer.h>
 #include <ArduinoOTA.h>
 #include <SoftwareSerial.h> 
 #include <ModbusMaster.h>
 #include <Ticker.h>
-#include <ESPAsyncWebServer.h>
 #include <ESPDash.h>
-#include "AsyncJson.h"
+#include <AsyncJson.h>
 #include "ArduinoJson.h"
+#include <ESP8266HTTPClient.h>
+
 #include "credentials.h"
+
 
 SoftwareSerial energyMeter(D7, D8, false);
 
@@ -15,55 +27,62 @@ AsyncWebServer server(80);
 
 ModbusMaster node;
 
-double voltage_usage = 0.0, current_usage = 0.0, active_power = 0.0, active_energy = 0.0, frequency = 0.0, power_factor = 0.0, over_power_alarm = 0.0; 
+double voltage_usage = 0.0, current_usage = 0.0, active_power = 0.0, active_energy = 0.0, frequency = 0.0, power_factor = 0.0;
+int over_power_alarm = 0; 
+double previous_energy = 0.0;
+unsigned long last_time_sent = 0;
+
 bool modbus_status = false;
 
 StaticJsonDocument<1024> server_raw_values;
 
 uint8_t result;  uint16_t data[6];
 
+WiFiClient  client;
+
+
 void pzemdata(){
 
-    //node.clearResponseBuffer();
+  //node.clearResponseBuffer();
 
-    Serial.println("Getting values...");
+  Serial.println("Getting values...");
 
-    ESP.wdtDisable();
-    result = node.readInputRegisters(0x0000, 10);
-    ESP.wdtEnable(1);
-    
-    if (result == node.ku8MBSuccess) {
-      modbus_status = true;
-      voltage_usage      = (node.getResponseBuffer(0x00) / 10.0f);
-      current_usage      = ((node.getResponseBuffer(0x02)<<16 | node.getResponseBuffer(0x01)) / 1000.000f);
-      active_power       = ((node.getResponseBuffer(0x04)<<16 | node.getResponseBuffer(0x03)) / 10.0f);
-      active_energy      = ((node.getResponseBuffer(0x06)<<16 | node.getResponseBuffer(0x05)) / 1.0f);
-      frequency          = (node.getResponseBuffer(0x07) / 10.0f);
-      power_factor       = (node.getResponseBuffer(0x08) / 100.0f);
-      over_power_alarm   = (node.getResponseBuffer(0x09));
+  ESP.wdtDisable();
+  result = node.readInputRegisters(0x0000, 10);
+  ESP.wdtEnable(1);
+  
+  if (result == node.ku8MBSuccess) {
+    modbus_status = true;
+    voltage_usage      = (node.getResponseBuffer(0x00) / 10.0f);
+    current_usage      = ((node.getResponseBuffer(0x02)<<16 | node.getResponseBuffer(0x01)) / 1000.000f);
+    active_power       = ((node.getResponseBuffer(0x04)<<16 | node.getResponseBuffer(0x03)) / 10.0f);
+    active_energy      = ((node.getResponseBuffer(0x06)<<16 | node.getResponseBuffer(0x05)) / 1.0f);
+    frequency          = (node.getResponseBuffer(0x07) / 10.0f);
+    power_factor       = (node.getResponseBuffer(0x08) / 100.0f);
+    over_power_alarm   = (node.getResponseBuffer(0x09));
 
-      server_raw_values["modbus_status"] = modbus_status;
-      server_raw_values["voltage_usage"] = voltage_usage;
-      server_raw_values["current_usage"] = current_usage;
-      server_raw_values["active_power"] = active_power;
-      server_raw_values["active_energy"] = active_energy;
-      server_raw_values["frequency"] = frequency;
-      server_raw_values["power_factor"] = power_factor;
-      server_raw_values["over_power_alarm"] = over_power_alarm;
+    server_raw_values["modbus_status"] = modbus_status;
+    server_raw_values["voltage_usage"] = voltage_usage;
+    server_raw_values["current_usage"] = current_usage;
+    server_raw_values["active_power"] = active_power;
+    server_raw_values["active_energy"] = active_energy;
+    server_raw_values["frequency"] = frequency;
+    server_raw_values["power_factor"] = power_factor;
+    server_raw_values["over_power_alarm"] = over_power_alarm;
 
 
-      Serial.print("VOLTAGE:           ");   Serial.println(voltage_usage);   // V
-      Serial.print("CURRENT_USAGE:     ");   Serial.println(current_usage, 3);  //  A
-      Serial.print("ACTIVE_POWER:      ");   Serial.println(active_power);   //  W
-      Serial.print("ACTIVE_ENERGY:     ");   Serial.println(active_energy, 3);  // kWh
-      Serial.print("FREQUENCY:         ");   Serial.println(frequency);    // Hz
-      Serial.print("POWER_FACTOR:      ");   Serial.println(power_factor);
-      Serial.print("OVER_POWER_ALARM:  ");   Serial.println(over_power_alarm, 0);
-      Serial.println("====================================================");  
-    } else{
-      modbus_status = false;
-      Serial.println("Failed to read Modbus");
-    }
+    Serial.print("VOLTAGE:           ");   Serial.println(voltage_usage);   // V
+    Serial.print("CURRENT_USAGE:     ");   Serial.println(current_usage, 3);  //  A
+    Serial.print("ACTIVE_POWER:      ");   Serial.println(active_power);   //  W
+    Serial.print("ACTIVE_ENERGY:     ");   Serial.println(active_energy, 3);  // kWh
+    Serial.print("FREQUENCY:         ");   Serial.println(frequency);    // Hz
+    Serial.print("POWER_FACTOR:      ");   Serial.println(power_factor);
+    Serial.print("OVER_POWER_ALARM:  ");   Serial.println(over_power_alarm, 0);
+    Serial.println("====================================================");  
+  } else{
+    modbus_status = false;
+    Serial.println("Failed to read Modbus");
+  }
 }
 
 void updateDashboardValues() {
@@ -77,8 +96,37 @@ void updateDashboardValues() {
   ESPDash.updateStatusCard("modbus_status", modbus_status);
 }
 
+void updateThingSpeak() {
+  HTTPClient http;
+  unsigned long now = millis();
+  double calculated_energy_in_interval = (active_energy-previous_energy) * ((now - last_time_sent) / 3600000.0);
+  // Create data string to send to ThingSpeak.
+  String data = String("&field" VOLTAGE "=") + String(voltage_usage, DEC) + "&field" CURRENT "=" + String(current_usage, DEC) 
+                    + "&field" POWER "=" + String(active_power, DEC) + "&field" FREQUENCY "=" + String(frequency, DEC) 
+                    + "&field" POWER_FACTOR "=" + String(power_factor, DEC) + "&field" OVER_POWER_STATUS "=" + String(over_power_alarm, DEC);
+  
+  // at first run we do not have previous energy measure and so we do not include them in the reported values 
+  if (previous_energy != 0){
+    data.concat(String("&field" ENERGY "=") + String(calculated_energy_in_interval, DEC));
+  }
+
+  if (http.begin(client, "http://api.thingspeak.com/update?api_key=" + String(thingspeakWriteToken) + data)) {
+      int code = http.GET();
+      server_raw_values["ts_code"] = code;
+      server_raw_values["ts_payload"] = http.getString();
+      http.end();
+      if (code == 200) {
+        previous_energy = active_energy;
+        last_time_sent = now;
+      }
+    } else {
+      server_raw_values["ts_code"] = -1;
+    }
+}
+
 Ticker collectValues(pzemdata, 100);
 Ticker updateDashboard(updateDashboardValues, 500);
+Ticker updateTS(updateThingSpeak, 20000);
 
 void setupOTA() {
   // If we need to change OTA port
@@ -127,6 +175,7 @@ void setupEnergyMeter() {
   // Modbus slave ID 1
   node.begin(1, energyMeter);
 
+  pzemdata();
   // Start collection of values
   collectValues.start();
 }
@@ -148,12 +197,18 @@ void setupDashboard() {
   updateDashboard.start();
 }
 
+void setupThingSpeak() {
+  updateThingSpeak();
+  updateTS.start();
+}
+
 void setup() {
   // Serial.begin(115200);
   setupWIFI();
   setupOTA();
   setupEnergyMeter();
   setupDashboard();
+  setupThingSpeak();
   server.on("/raw", HTTP_GET, [](AsyncWebServerRequest *request){
         String buffer;
         serializeJsonPretty(server_raw_values, buffer);
@@ -166,4 +221,5 @@ void loop() {
   ArduinoOTA.handle();
   collectValues.update();
   updateDashboard.update();
+  updateTS.update();
 }
