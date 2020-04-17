@@ -28,10 +28,8 @@ AsyncWebServer server(80);
 ModbusMaster node;
 
 double voltage_usage = 0.0, current_usage = 0.0, active_power = 0.0, active_energy = 0.0, frequency = 0.0, power_factor = 0.0;
-int over_power_alarm = 0; 
+int over_power_alarm = 0;
 double previous_energy = 0.0;
-unsigned long last_time_sent = 0;
-
 bool modbus_status = false;
 
 StaticJsonDocument<1024> server_raw_values;
@@ -98,15 +96,14 @@ void updateDashboardValues() {
 
 void updateThingSpeak() {
   HTTPClient http;
-  unsigned long now = millis();
-  double calculated_energy_in_interval = (active_energy-previous_energy) * ((now - last_time_sent) / 3600000.0);
+  double calculated_energy_in_interval = active_energy-previous_energy;
   // Create data string to send to ThingSpeak.
   String data = String("&field" VOLTAGE "=") + String(voltage_usage, DEC) + "&field" CURRENT "=" + String(current_usage, DEC) 
                     + "&field" POWER "=" + String(active_power, DEC) + "&field" FREQUENCY "=" + String(frequency, DEC) 
                     + "&field" POWER_FACTOR "=" + String(power_factor, DEC) + "&field" OVER_POWER_STATUS "=" + String(over_power_alarm, DEC);
   
   // at first run we do not have previous energy measure and so we do not include them in the reported values 
-  if (previous_energy != 0){
+  if (previous_energy != 0 && calculated_energy_in_interval > 0){
     data.concat(String("&field" ENERGY "=") + String(calculated_energy_in_interval, DEC));
   }
 
@@ -117,7 +114,6 @@ void updateThingSpeak() {
       http.end();
       if (code == 200) {
         previous_energy = active_energy;
-        last_time_sent = now;
       }
     } else {
       server_raw_values["ts_code"] = -1;
